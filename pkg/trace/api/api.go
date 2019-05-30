@@ -24,6 +24,8 @@ import (
 
 	"github.com/tinylib/msgp/msgp"
 
+	"github.com/DataDog/datadog-agent/pkg/tagger"
+	"github.com/DataDog/datadog-agent/pkg/tagger/collectors"
 	"github.com/DataDog/datadog-agent/pkg/trace/config"
 	"github.com/DataDog/datadog-agent/pkg/trace/info"
 	"github.com/DataDog/datadog-agent/pkg/trace/metrics"
@@ -289,6 +291,10 @@ const (
 	// with the number of traces contained in the payload.
 	headerTraceCount = "X-Datadog-Trace-Count"
 
+	// headerContainerID specifies the name of the header which contains the ID of the
+	// container where the request originated.
+	headerContainerID = "Datadog-Container-ID"
+
 	// headerLang specifies the name of the header which contains the language from
 	// which the traces originate.
 	headerLang = "Datadog-Meta-Lang"
@@ -375,7 +381,8 @@ func (r *HTTPReceiver) handleTraces(v Version, w http.ResponseWriter, req *http.
 			r.wg.Done()
 			watchdog.LogOnPanic()
 		}()
-		r.processTraces(ts, traces)
+		entityID := req.Header.Get(headerContainerID)
+		r.processTraces(ts, entityID, traces)
 	}()
 }
 
@@ -385,12 +392,18 @@ type Trace struct {
 	// language, interpreter, tracer version, etc.
 	Source *info.Tags
 
+	// EntityTags specifies orchestrator tags corresponding to the origin of this
+	// trace (e.g. K8S pod, Docker image, ECS, etc).
+	EntityTags map[string]string
+
 	// Spans holds the spans of this trace.
 	Spans pb.Trace
 }
 
-func (r *HTTPReceiver) processTraces(ts *info.TagStats, traces pb.Traces) {
+func (r *HTTPReceiver) processTraces(ts *info.TagStats, entityID string, traces pb.Traces) {
 	defer timing.Since("datadog.trace_agent.internal.normalize_ms", time.Now())
+
+	entityTags := getEntityTags(entityID)
 	for _, trace := range traces {
 		spans := len(trace)
 
@@ -404,8 +417,9 @@ func (r *HTTPReceiver) processTraces(ts *info.TagStats, traces pb.Traces) {
 		}
 
 		r.Out <- &Trace{
-			Source: &ts.Tags,
-			Spans:  trace,
+			Source:     &ts.Tags,
+			EntityTags: entityTags,
+			Spans:      trace,
 		}
 	}
 }
@@ -565,6 +579,37 @@ func tracesFromSpans(spans []pb.Span) pb.Traces {
 	}
 
 	return traces
+}
+
+// getEntityTags returns tags belonging to entityID. If entityID is empty or no
+// tags are found, an empty map is returned.
+func getEntityTags(entityID string) map[string]string {
+	if entityID == "" {
+		return map[string]string{}
+	}
+	// for now, only Kubernetes is supported
+	list, err := tagger.Tag("container_id://"+entityID, collectors.HighCardinality)
+	if err != nil {
+		return map[string]string{}
+	}
+	tags := make(map[string]string, len(list))
+	for _, tag := range list {
+		// this is a metrics product style tag; either a "key:value" pair,
+		// or simply "key", without a value.
+		parts := strings.Split(tag, ":")
+		if parts[0] == "" {
+			continue
+		}
+		k := "container." + parts[0]
+		if len(parts) > 1 {
+			// key and value
+			tags[k] = parts[1]
+		} else {
+			// key only
+			tags[k] = ""
+		}
+	}
+	return tags
 }
 
 // getMediaType attempts to return the media type from the Content-Type MIME header. If it fails
