@@ -199,6 +199,9 @@ func parseContainerNetworkAddresses(ports []types.Port, netSettings *types.Summa
 	}
 	for _, port := range ports {
 		if isExposed(port) {
+			if port.IP == "" {
+				continue
+			}
 			IP := net.ParseIP(port.IP)
 			if IP == nil {
 				log.Warnf("Unable to parse IP: %v for container: %s", port.IP, container)
@@ -218,6 +221,9 @@ func parseContainerNetworkAddresses(ports []types.Port, netSettings *types.Summa
 		}
 	}
 	for _, network := range netSettings.Networks {
+		if network.IPAddress == "" {
+			continue
+		}
 		IP := net.ParseIP(network.IPAddress)
 		if IP == nil {
 			log.Warnf("Unable to parse IP: %v for container: %s", network.IPAddress, container)
